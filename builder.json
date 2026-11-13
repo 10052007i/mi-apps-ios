@@ -1,0 +1,20 @@
+{
+  "project": "MiApp.",
+  "platform": "ios",
+  "github": {
+    "owner": "10052007i",
+    "repo": "mi-apps-ios"
+  },
+  "provider": "github",
+  "codemagic": {},
+  "bitrise": {},
+  "ios": {
+    "bundleId": "com.cibertec.miapp"
+  },
+  "flutter": {
+    "watch": {}
+  },
+  "reactNative": {},
+  "kmp": {},
+  "mobai": {}
+}
