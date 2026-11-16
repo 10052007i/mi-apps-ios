@@ -1,15 +1,16 @@
 {
-  "project": "MiApp.",
+  "project": "BarEvents.",
   "platform": "ios",
   "github": {
-    "owner": "10052007i",
+    "owner": "Aroncapi",
     "repo": "mi-apps-ios"
   },
   "provider": "github",
   "codemagic": {},
   "bitrise": {},
   "ios": {
-    "bundleId": "com.cibertec.miapp"
+    "scheme": "BarEvents",
+    "bundleId": "com.cibertec.velvetgilt"
   },
   "flutter": {
     "watch": {}

@@ -1,0 +1,1374 @@
+================================================================================
+PROYECTO: VELVET & GILT - Plataforma de servicios de mixologia para eventos
+          (carpeta local: bar-events | repo remoto: Aroncapi/Elixir-Cocktails)
+Arquitectura: Microservicios (Spring Cloud) + Angular
+Ubicacion:    C:\Users\AROM\Projects\bar-events
+Nota maestra: LEER ESTA NOTA ANTES DE TOCAR CUALQUIER COSA
+Ultima actualizacion: 16/11/2026 - SESION 11: tunel HTTPS con cloudflared
+(tunnel.ps1) para probar el backend desde una app movil iOS -> bloque 0.11.
+Sesion 10: seguridad OWASP (4 criticos + medios), destilados en el catalogo
+y fin de la categoria Sin Alcohol -> bloque 0.10.
+Sesion 9: preparacion para Oracle Cloud Free (.env, deploy.sh, MySQL cerrado
+en 127.0.0.1) -> bloque 0.9.
+TODO corre en Docker: http://localhost (frontend + /api via nginx).
+Ver bloque 0.11 (lo ultimo) y 0.10/0.9 para el historial.
+================================================================================
+
+--------------------------------------------------------------------------------
+0. ESTADO ACTUAL - DONDE VAMOS (leer primero)
+--------------------------------------------------------------------------------
+
+FASE 0 (scaffolding) - PROGRESO:
+
+  [x] Repo git inicializado en C:\Users\AROM\Projects\bar-events (+ .gitignore)
+  [x] 5 servicios generados via start.spring.io REST (NO con el wizard de
+      IntelliJ, se generaron igual: type=maven-project, boot=4.1.1,
+      groupId=com.barpro, java=25)
+  [x] BOM spring-cloud 2025.1.2 + dependencias manuales en los 5 poms
+  [x] application.properties de cada servicio (puertos + nombres + datasource)
+  [x] docker-compose.yml con MySQL 8 + docker/mysql/init.sql
+      (crea auth_db, core_db, notif_db y el usuario barpro/barpro)
+  [x] MySQL corriendo y verificado: las 3 bases existen
+  [x] Maven 3.9.16 instalado en C:\Users\AROM\Tools\apache-maven-3.9.16
+      (agregado al PATH de usuario; winget NO tiene Apache.Maven)
+  [x] Angular CLI 22 instalado (npm i -g @angular/cli@22)
+  [x] LOS 5 SERVICIOS COMPILAN (mvn -DskipTests compile => EXIT 0)
+
+  [x] PENDIENTE #1 resuelto: @EnableEurekaServer agregado a
+      eureka-server/src/main/java/com/barpro/eureka/EurekaServerApplication.java
+      -> Eureka arriba en http://localhost:8761 (actuator/health = UP)
+  [x] Los 4 demas servicios arrancaron y se registraron en Eureka (sesion 2):
+        AUTH-SERVICE          :8081  UP
+        CORE-SERVICE          :8082  UP
+        NOTIFICATION-SERVICE  :8083  UP
+        GATEWAY-SERVICE       :8080  UP
+      (todos /actuator/health = OK, MySQL container healthy)
+      Para arrancarlos: cada uno en su propio proceso, ver bloque 5
+      Logs de arranque: *.log en la raiz (estan en .gitignore)
+  [x] PENDIENTE: commit inicial del repo (HECHO sesion 2, rama main)
+      Remoto: https://github.com/Aroncapi/Elixir-Cocktails.git (origin)
+      Git config global: Aarom <aromcapilloramos@gmail.com>
+  [x] PENDIENTE: frontend Angular (CREADO en frontend/, ver bloque 0.3)
+
+  NOTA sesion 2: eureka-client NO dio el error de TransportClientFactories
+  en los otros 4 servicios (solo le pasaba al server). Si alguno lo diera:
+  eureka.client.jersey.enabled=false
+
+--------------------------------------------------------------------------------
+0.1 FASE 1 (auth + JWT + gateway) - COMPLETA (backend sesion 2, frontend sesion 3)
+--------------------------------------------------------------------------------
+
+  [x] auth-service - codigo nuevo:
+      - Flyway V1__create_users.sql (tabla users)
+        OJO: MySQL 8 NO acepta "GENERATED ... AS IDENTITY" -> usar
+        "BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY"
+        (si se migra a PostgreSQL ahi si aplica IDENTITY)
+      - Entidad User (email unico, password bcrypt, role ADMIN/STAFF, active)
+      - JwtService: jjwt 0.13.0, ALGORITMO EXPLICITO .signWith(key, Jwts.SIG.HS256)
+        (sin especificarlo jjwt elige HS384 cuando la clave > 384 bits)
+      - JwtAuthenticationFilter + SecurityConfig: stateless, permit en
+        /api/auth/login y /actuator/**, resto autenticado, @EnableMethodSecurity
+      - Endpoints:
+          POST   /api/auth/login   PUBLICO -> {token,type,user}
+          GET    /api/auth/me      Bearer
+          GET    /api/users        Bearer + rol ADMIN
+          POST   /api/users        Bearer + rol ADMIN (409 si email existe)
+          PUT    /api/users/{id}   Bearer + rol ADMIN (no te degradas/desactivas)
+          DELETE /api/users/{id}   Bearer + rol ADMIN (desactiva, no borra)
+      - Seed automatico si la tabla esta vacia:
+        admin@velvetgilt.com / admin123  (cambiar antes de produccion)
+  [x] gateway-service - codigo nuevo:
+      - 5 rutas (el ORDER importa, gana la primera que coincide):
+          10  /api/auth/**           -> auth-service
+          20  /api/users/**          -> auth-service
+          30  /api/notifications/**  -> notification-service
+          40  /api/public/**         -> core-service   (sin JWT)
+          50  /api/**                -> core-service
+      - JwtAuthGlobalFilter (order -100): valida Bearer con el mismo secreto,
+        inyecta X-User-Email / X-User-Role y BORRA esos headers si el cliente
+        los manda (anti-spoofing). Publicos: /api/auth/login, /api/public/**,
+        /actuator/**. Si no: 401 JSON.
+      - CORS configurado para http://localhost:4200 (Angular)
+  [x] FIX OBLIGATORIO: eureka.instance.hostname=localhost en los 4 clientes
+      (sin esto Eureka registra <host>.mshome.net y el DNS de Netty del
+       gateway falla con NXDOMAIN -> 500 "Failed to resolve")
+  [x] Flujo probado contra http://localhost:8080 (gateway):
+        login OK -> token HS256, /me OK, sin token 401, password mala 401,
+        spoof X-User-Email 401, /api/users con token admin 200
+
+  [x] PENDIENTE fase 1: LOGIN + GUARD en Angular (RESUELTO en sesion 3):
+        - core/models/usuario.ts, core/services/auth.ts (login/logout,
+          signals token/usuario, persiste en localStorage velvet_token y
+          velvet_usuario)
+        - core/interceptors/auth.interceptor.ts agrega Authorization: Bearer
+          (registrado en app.config.ts con withInterceptors)
+        - core/guards/auth.guard.ts (redirige a /login si no hay token)
+        - features/login (diseñado, sin wireframe: panel glass sobre imagen)
+        - rutas: /login -> Login | /panel -> Placeholder + canActivate guard
+        - nav: si hay sesion muestra email + Cerrar sesión y link "Panel";
+          si no, "Iniciar sesión"
+      Probado por el proxy: login 200 (role ADMIN), /me 200, /users 200,
+      /users sin token 401
+  [ ] PENDIENTE: notification-service sin codigo todavia
+
+--------------------------------------------------------------------------------
+0.2 FASE 2 (catalogo) - core-service - COMPLETA (backend sesion 2, UI sesion 3)
+--------------------------------------------------------------------------------
+
+  [x] Flyway en core_db (SQL portable, sin ENUM, tipos VARCHAR):
+        V1__create_event_types.sql    code/name/description/active/sort_order
+        V2__create_service_tiers.sql  code/name/tier_type/price/active
+        V3__create_cocktails.sql      name/category/ingredients/image_url/active
+                                      + cocktail_event_types (M2M con FK CASCADE)
+        V4__seed_catalog.sql          4 tipos de evento, 3 tiers, 8 cocteles
+                                      (precios en NULL: se definen en fase 4)
+  [x] Entidades JPA: EventType, ServiceTier, Cocktail (M2M EAGER con EventType)
+      Enums: CocktailCategory (SIGNATURE/CLASICOS/CITRICOS/SIN_ALCOHOL),
+             TierType (BASE/PREMIUM/PERSONAL)
+  [x] Seguridad core-service: GatewayHeaderAuthFilter confia en X-User-Email /
+      X-User-Role que inyecta el gateway (borrados a la entrada).
+      /api/public/** permitAll; el resto autenticado; @PreAuthorize ADMIN.
+      OJO: si alguien entra directo a :8082 podria forzar los headers;
+      en produccion solo el gateway queda expuesto.
+  [x] Endpoints:
+        PUBLICOS (sin token):
+          GET /api/public/event-types
+          GET /api/public/service-tiers
+          GET /api/public/cocktails?category=&search=
+        ADMIN (Bearer + rol ADMIN):
+          GET/POST /api/cocktails,      PUT/DELETE /api/cocktails/{id}
+          GET/POST /api/event-types,    PUT/DELETE /api/event-types/{id}
+          GET/POST /api/service-tiers,  PUT/DELETE /api/service-tiers/{id}
+        DELETE = desactivacion suave (active=false), nunca borra
+      Errores: 400 validacion, 404 no encontrado, 409 duplicado, 401/403
+  [x] JDBC URL con useUnicode=UTF-8&characterEncoding=UTF-8 en los 3 servicios
+      con DB (acento en ingredientes/queries)
+  [x] Prueba completa por :8080 -> 10/10 OK:
+      event-types 4, cocktails 8, filtro category, busqueda, 401 sin token,
+      200 con token, POST 201, duplicado 409, DELETE soft, public lista OK
+
+  [x] PENDIENTE fase 3: Client (VIP/Corporativo/Particular, gasto acumulado)
+      -> RESUELTO en la sesion 4 (ver bloque 0.5)
+  [ ] PENDIENTE: notification-service
+
+  [x] UI admin del catalogo HECHA en la sesion 3 (ver detalle en bloque 0.3)
+      -> la Fase 2 queda COMPLETA (backend + frontend)
+
+--------------------------------------------------------------------------------
+0.3 FRONTEND (Angular) - PROGRESO (sesiones 2-3)
+--------------------------------------------------------------------------------
+
+  WIREFRAMES: C:\Users\AROM\Downloads\stitch_velvet_gilt_event_platform
+  (correccion: son 12 pantallas, NO 13; y NO hay pantalla de login ->
+   el login se disenara. Cada carpeta trae code.html + screen.png;
+   velvet_gilt\DESIGN.md trae tokens de color/tipografia/espaciado.
+   OJO: gestor_de_cat_logo_admin y gestor_de_cat_logo_editar_c_ctel tienen
+   screen.png ROTO (28 bytes: "<FIFE Image failed to fetch>") -> para esas
+   dos SOLO existe el code.html, que si esta completo.
+   SIEMPRE leer el code.html antes de crear la pantalla, ahi esta el diseno
+   exacto (clases tailwind + custom: brass-bg, glass-nav, surface-card...).
+
+  [x] ng new frontend --style=css --routing --ssr=false --defaults --skip-git
+      Angular CLI 22.2.1 / Node 24.21 / npm 11.19. Compila OK.
+      OJO en Angular 22: componentes app.ts / app.html (sin ".component"),
+      existe @Service(), no hay NgModule, se usa @if/@for (= *ngIf/*ngFor),
+      signales con signal() y se inyectan con inject().
+  [x] proxy.conf.json + "proxyConfig" en angular.json (architect.serve.options)
+      -> ng serve en :4200 manda /api/** a http://localhost:8080 (sin CORS)
+  [x] features/home  -> wireframe "inicio_velvet_gilt" (nav glass fixed,
+      hero split-screen con foto + CTA + indicadores 500+/100%,
+      seccion Nuestra Filosofia con 3 tarjetas e iconos Material)
+  [x] features/catalog -> carta publica desde /api/public/cocktails
+  [x] features/placeholder -> paginas en blanco con data: {titulo} en la ruta
+      (hoy solo quedan: cotizador y panel; servicios/contacto/login ya existen)
+  [x] app.html = la barra global del wireframe (logo, links con
+      routerLinkActive, boton Iniciar sesion, menu movil con signal)
+  [x] index.html: Playfair Display + Inter + Material Symbols Outlined
+      styles.css: tokens --fondo #0f0f0f, --superficie #151c25,
+      --tarjeta #1a1a1a, --dorado #d4af37, --texto #dce3f0,
+      botones .btn-primario / .btn-secundario (rectos 0px, uppercase)
+  [x] features/services -> wireframe "servicios_velvet_gilt" (header
+      "Nuestras Experiencias" + rejilla 2x2 de tarjetas con imagen,
+      hover scale 1.05, titulos dorado #e9c349, CTA -> /cotizador)
+  [x] features/contact -> wireframe "contacto_velvet_gilt" (split: form
+      lineas con borde inferior + panel glass a la derecha con info/síguenos)
+  [x] Rutas: '' Home | /catalogo Carta | /servicios Services | /contacto
+      Contact | /cotizador /login Placeholder | ** -> ''
+      (nota: los <style> de los wireframes usan #e9c349 "secondary" para
+       titulos dorados, distinto del --dorado #d4af37 de botones/bordes)
+  [x] angular.json: anyComponentStyle subido a 16kB warn / 32kB error
+      (el CSS del panel admin ya pesa 12.6kB)
+
+  [x] login + guard de rutas (cierra fase 1 - ver detalle en bloque 0.1)
+
+  [x] features/admin/catalog-admin -> wireframes gestor_de_cat_logo_admin
+      + editar_c_ctel (la pantalla "editar" es el mismo modal):
+      - sidebar fija (avatar, Admin Panel, Dashboard/Solicitudes/Config
+        COMO PLACEHOLDER, Catálogo activo) + Cerrar Sesión real
+      - cabecera con busqueda (filtra por nombre/ingredientes) + Filtrar
+        (muestra select de categoria) + Agregar Nuevo
+      - rejilla 1/2/3/4 columnas: imagen 4:3, interruptor activo (PUT),
+        badge Inactivo, tags de eventos, editar (modal) / desactivar (DELETE)
+      - modal Agregar/Editar: imagen por URL (NO hay subida de archivos en
+        el backend), nombre, categoria, ingredientes, checkboxes de eventos
+      - rutas: /panel -> CatalogAdmin con canActivate (guard)
+      - app.ts: enPanel() oculta la barra publica dentro de /panel
+      - CRUD probado por :8080 con token: GET 200, POST 201, PUT 200,
+        DELETE soft 200. DB restaurada a los 8 seeds (borre los residuos
+        de los tests de las sesiones 2 y 3)
+
+  [x] features/admin/clients-admin (sesion 4, ver bloque 0.5)
+  [ ] PENDIENTE: demas wireframes (cotizador 3 pasos, confirmacion,
+      dashboard panel, detalle solicitud)  <- clientes ya NO falta
+
+  [x] Verificado al final de la sesion 3: ng build OK (sin warnings),
+      ng serve :4200 sirve todo (bundle contiene servicios, contacto,
+      login y panel), proxy -> gateway OK (cocktails 8, event-types 4)
+  [ ] PENDIENTE: foto del hero usa la URL de lh3.googleusercontent del
+      code.html (descargar y pasarla a /public si se quiere offline)
+
+
+PENDIENTE #1 - EUREKA SERVER NO ARRANCA -> RESUELTO (sesion 2, fix aplicado)
+  Sintoma: mvn spring-boot:run falla con
+     "No qualifying bean of type
+      'com.netflix.discovery.shared.transport.jersey.TransportClientFactories'"
+  Causa raiz (confirmada con el reporte --debug de Spring):
+     la clase principal NO tiene @EnableEurekaServer.
+     Initializr solo genera @SpringBootApplication. Sin esa anotacion no se
+     crea EurekaServerMarkerConfiguration$Marker y por lo tanto no se activa
+     EurekaServerJerseyClientAutoConfiguration (que es la que publica los
+     beans de transporte HTTP de Eureka).
+  FIX: anotar la clase principal de eureka-server con @EnableEurekaServer.
+  Archivo: eureka-server/src/main/java/com/barpro/eureka/EurekaServerApplication.java
+  Despues re-ejecutar y verificar: http://localhost:8761/actuator/health
+
+  Contexto util si vuelve a fallar (diagnostico completo):
+  - Spring Cloud Netflix 5.0.2 tiene 3 transportes para EurekaClient:
+      Jersey   -> se activa si existe clase org.glassfish.jersey.client.JerseyClient
+                  (si: eureka-client-jersey3 la trae) y eureka.client.jersey.enabled
+                  no este en false
+      RestClient -> solo si jersey NO esta presente o eureka.client.jersey.enabled=false
+                    (clase org.springframework.web.client.RestClient, esta en spring-web)
+      WebClient  -> si hay clase WebClient (spring-webflux) y no este deshabilitado
+  - En nuestra app: jersey SI esta, asi que la rama RestClient queda bloqueada.
+  - Si un cliente (auth/core/notification/gateway) diera el mismo error,
+    probar primero: eureka.client.jersey.enabled=false  (fuerza la rama RestClient)
+    o agregar spring-boot-starter-restclient al pom.
+  - Diagnostico reproducible con:
+      mvn spring-boot:run "-Dspring-boot.run.arguments=--debug"
+
+--------------------------------------------------------------------------------
+0.4 HANDOFF - COMO CONTINUAR LA SESION 7 (LEER PRIMERO)
+--------------------------------------------------------------------------------
+
+QUE SE HIZO EN LA SESION 6 (esta; SIN COMMITEAR; ver bloque 0.7):
+  - Paginacion server-side en /api/requests (JPQL + Page), /resumen y
+    /eventos; el dashboard ya no carga toda la tabla
+  - Transiciones de estado validadas (409 Conflict) + mensaje en la UI
+  - /panel/calendario (rejilla mensual)  -> FASE 4 CERRADA
+  - FASE 6: notification-service completo (V1 notifications, entity/DTO/
+    service/controller, seguridad con header del gateway, sender CONSOLA
+    y SMTP) + integracion core-service -> notificaciones
+  - Boton "Enviar paquete por WhatsApp" en el admin (mensaje armado con
+    los datos del cliente: ver core/utils/whatsapp.ts)
+  - Tests: core 4, notification 5, frontend 14 (ng test)
+
+QUE SE HIZO EN LA SESION 5 (fases 4 y 5; ver bloque 0.6):
+  - Backend de solicitudes (V7/V8, folio REQ-xxx, token, desglose, estados)
+  - Cotizador 3 pasos + confirmacion + /panel/solicitudes + detalle + PDF
+  - /solicitud/{token} publico con PDF  -> FASE 5 CERRADA
+  - Verificado end-to-end contra MySQL (POST, PDF, estados, clientes)
+
+QUE SE HIZO EN LA SESION 4 (backend + frontend de clientes, todo commiteado):
+  - Commit f93af3b con los 111 archivos pendientes + push a origin/main
+  - FASE 3 CERRADA: backend Client en core-service (V5/V6) + pantalla
+    /panel/clientes -> ver detalle completo en el bloque 0.5
+  - Sidebar del panel: links reales Catalogo <-> Clientes (RouterLink) y
+    h2/p corregidos a "Velvet & Gilt" / "Admin Panel"
+  - Todo verificado end-to-end (:8080 y proxy :4200) y DB con los 3 seeds
+
+QUE SE HIZO EN LA SESION 3 (frontend):
+  - Auditoria de esta nota: 6 errores corregidos (Angular Material nunca se
+    instalo, "13 pantallas" eran 12, roles reales ADMIN/STAFF, colores,
+    AUTO_INCREMENT, endpoints/archivos pendientes marcados)
+  - Pantallas /servicios y /contacto (wireframes completos)
+  - Login + AuthService + interceptor + guard  -> FASE 1 CERRADA (ver 0.1)
+  - Panel admin del catalogo con CRUD completo -> FASE 2 CERRADA (ver 0.3)
+  - angular.json: anyComponentStyle en 16kB warn / 32kB error
+  - DB restaurada a los 8 seeds de cocteles (borre residuos de tests)
+
+GIT - OJO (actualizado sesion 6):
+  - ULTIMO COMMIT: f93af3b (ya esta en origin/main).
+  - EL ARBOL NO ESTA LIMPIO: todo lo de las sesiones 5 y 6 esta SIN
+    COMMITEAR (frontend, core-service, notification-service, la nota).
+    Preguntar antes de commit/push: es lo primero que hay que cerrar.
+  - Ver: git status -uall   |   git log --oneline
+
+PROCESOS (al cerrar la sesion 6 estaban arriba: 3306, 4200, 8082, 8083;
+si faltan, levantar en este orden):
+  MySQL      docker compose up -d                                    (healthy)
+  Eureka     mvn.cmd spring-boot:run -f eureka-server\pom.xml        :8761
+  Auth       mvn.cmd spring-boot:run -f auth-service\pom.xml         :8081
+  Core       mvn.cmd spring-boot:run -f core-service\pom.xml         :8082
+  Notif      mvn.cmd spring-boot:run -f notification-service\pom.xml :8083
+  Gateway    mvn.cmd spring-boot:run -f gateway-service\pom.xml      :8080
+  Frontend   cd frontend && ng serve                                 :4200
+  Maven: C:\Users\AROM\Tools\apache-maven-3.9.16\bin\mvn.cmd
+  OJO: arrancar con -WindowStyle Hidden si no se quiere la ventana cmd
+  Logs: *.log en la raiz (.gitignore)
+
+CREDENCIALES DE PRUEBA:
+  admin@velvetgilt.com / admin123   (seed de auth-service)
+  DB: barpro/barpro  (root: root)  bases auth_db / core_db / notif_db
+
+COMO VERIFICAR QUE TODO VIVE (PowerShell, ~1 minuto):
+  rutas:   /panel  /panel/clientes  /panel/solicitudes  /panel/calendario
+           (las 4 deben dar 200 en http://localhost:4200)
+  login:   $t=(Invoke-RestMethod -Method Post -Uri http://localhost:4200/api/auth/login
+           -ContentType 'application/json'
+           -Body '{"email":"admin@velvetgilt.com","password":"admin123"}').token
+  admin:   Invoke-RestMethod http://localhost:4200/api/cocktails -Headers @{Authorization="Bearer $t"}
+           (sin token debe dar 401)
+  pagina:  Invoke-RestMethod "http://localhost:4200/api/requests?page=0&size=10" `
+             -Headers @{Authorization="Bearer $t"}
+           -> {items, total, page, size, totalPages}
+  resumen: .../api/requests/resumen   -> {solicitudes, ingresosEstimados, ...}
+  eventos: .../api/requests/eventos?desde=2026-10-01&hasta=2026-10-31
+  notif:   POST http://localhost:4200/api/public/solicitudes crea y dispara
+           NOTIF de core -> :8083; verlas con
+           Invoke-RestMethod http://localhost:8083/api/notifications `
+             -Headers @{'X-User-Email'='admin@velvet.mx';'X-User-Role'='ADMIN'}
+  PDF:     http://localhost:4200/api/public/solicitudes/{token}/pdf -> application/pdf
+  build:   cd frontend && ng build    (SIN warnings)
+  tests:   cd frontend && ng test     (9 archivos / 14 tests)
+           mvn.cmd -q test -f core-service\pom.xml          (4 tests)
+           mvn.cmd -q test -f notification-service\pom.xml  (5 tests)
+
+ESTADO DEL FRONTEND (estructura ya creada, seguirla):
+  frontend/src/app/
+    app.ts|html|css    nav publica; se OCULTA dentro de /panel (enPanel())
+    app.routes.ts      '' | /catalogo | /servicios | /contacto | /login
+                       | /panel (CatalogAdmin) | /panel/clientes
+                       | /panel/solicitudes  | /panel/dashboard (alias)
+                       | /panel/calendario   | /panel/solicitudes/:id
+                       | /cotizador          | /solicitud/:token (publico)
+                       | ** -> Home  (Placeholder quedo FUERA de rutas)
+    app.config.ts      provideHttpClient(withInterceptors([authInterceptor]))
+    core/services/     catalog.ts (publico), solicitudes.ts (publico),
+                       auth.ts, admin-catalog.ts, admin-clients.ts,
+                       admin-requests.ts (page/resumen/eventos/get/update)
+    core/utils/whatsapp.ts   mensajePaquete() + enlaceWhatsapp() compartidos
+    core/guards/auth.guard.ts              redirige a /login si no hay token
+    core/interceptors/auth.interceptor.ts  agrega Authorization: Bearer
+    features/          home, catalog, services, contact, login, quote,
+                       seguimiento, admin/catalog-admin, admin/clients-admin,
+                       admin/requests-admin (dashboard+tabla),
+                       admin/request-detail, admin/calendario,
+                       placeholder (codigo muerto, su spec sigue pasando)
+  PATRONES A SEGUIR: archivos sin ".component" (services.ts/services.html),
+  clases en ingles (Home, Services, Contact, Login, CatalogAdmin),
+  @if / @for (no *ngIf/*ngFor), signals + inject(), FormsModule + ngModel
+  en formularios, CSS por componente con los tokens de styles.css.
+
+SIGUIENTE PASO - DECISION PENDIENTE DEL USUARIO (preguntar al arrancar):
+  a) COMMIT + PUSH de todo lo de las sesiones 5 y 6 (recomendado primero;
+     ya hay tests verdes que respaldan el cambio)
+  b) RabbitMQ + sender automatico de WhatsApp (Evolution API o Cloud API)
+     para que las cotizaciones nuevas te lleguen solas a tu numero
+  c) Fase 7: despliegue en la nube (URL publica para compartir links)
+  d) Pendientes chicos: Configuracion en el sidebar sigue sin pantalla,
+     paginacion server-side de clientes, foto hero offline
+
+METODO PARA REPRODUCIR UNA PANTALLA WIREFRAME (ya usado 4 veces):
+  1. Leer <pantalla>\screen.png  -> ver el diseno
+     OJO: gestor_de_cat_logo_admin y ..._editar_c_ctel tienen screen.png
+     ROTO (28 bytes "<FIFE Image failed to fetch>") -> para esas, solo
+     code.html (que si esta completo)
+  2. Leer <pantalla>\code.html    -> HTML/CSS EXACTO (clases tailwind +
+     custom: brass-border, glass-panel, input-line, surface-card...)
+  3. Crear el componente siguiendo el patron de features/ (a mano o
+     ng generate component features/<nombre>)
+  4. Mapear tailwind -> CSS propio con los tokens de styles.css:
+     dorado #d4af37 (botones/bordes), dorado claro #e9c349 (titulos),
+     fondo #0f0f0f, superficie #151c25, tarjeta #192029, texto #dce3f0,
+     secundario #c4c7c7, botones rectos uppercase tracking .05em
+  5. Registrar la ruta en app.routes.ts (quitar Placeholder si lo reemplaza)
+  6. Verificar: ng build sin warnings + ruta 200 en :4200
+
+DETALLES QUE SUELEN TRABAR (descubiertos en la sesion 3):
+  - Las fotos de los wireframes son URLs lh3.googleusercontent: usarlas
+    tal cual (o descargarlas a frontend/public para modo offline).
+  - El backend NO sube archivos: en formularios la imagen va como URL
+    (campo imageUrl del CocktailRequest).
+  - Los wireframes de admin traen items sin pantalla (Dashboard, Solicitudes,
+    Configuracion, Nueva Reserva): quedaron como placeholder visual (spans
+    y boton disabled) hasta que existan esas pantallas.
+  - Si Angular bloquea url() en un binding [style], mover la imagen al
+    .css del componente (ya paso con la marca de agua de contacto).
+  - Categorias validas del backend: SIGNATURE, CLASICOS, CITRICOS,
+    SIN_ALCOHOL. Roles: ADMIN, STAFF.
+
+PENDIENTES DE BACKEND AUN:
+  - RabbitMQ: hoy core -> notificacion es HTTP sincrono (post-commit, con
+    timeout 2s y fallback a log); con cola seria async + reintentos
+  - Sender de WhatsApp real: el canal WHATSAPP existe pero no hay
+    transportador (Evolution API o WhatsApp Cloud API); hoy todo sale por
+    CONSOLA (solo imprime) o SMTP si se define spring.mail.host
+  - Correos reales: configurar spring.mail.* en notification-service
+  - Paginacion server-side de clientes y catalogo (solicitudes ya la tiene)
+  - La carpeta NO se renombro a Elixir-Cocktails (bloqueada; quedo bar-events)
+
+--------------------------------------------------------------------------------
+0.5 FASE 3 (clientes) - COMPLETA (backend + UI, sesion 4)
+--------------------------------------------------------------------------------
+
+  [x] core-service - backend:
+      - Flyway V5__create_clients.sql: tabla clients (name, email UNICO y
+        nullable, whatsapp, location, tier, total_spent, reservations,
+        last_event, active, created_at). PK BIGINT AUTO_INCREMENT (MySQL).
+      - V6__seed_clients.sql: 3 clientes demo que calcan las filas del
+        wireframe (Elena Rostova VIP 12 reservas $45,200 | Arch & Co.
+        CORPORATIVO 4 / $18,500 | David Sterling PARTICULAR inactivo)
+      - Enum ClientTier: VIP / CORPORATIVO / PARTICUAR -> VIP / CORPORATIVO /
+        PARTICULAR (mismos textos que muestra el UI)
+      - Entidad Client, DTOs ClientRequest/ClientResponse, ClientRepository,
+        ClientService (busqueda por nombre/correo/ubicacion/ultimo evento +
+        filtro por tier, 409 si el correo ya existe, tier invalido -> 400)
+      - ClientAdminController en /api/clients con @PreAuthorize ADMIN:
+          GET    /api/clients?search=&tier=
+          POST   /api/clients        (201)
+          PUT    /api/clients/{id}
+          DELETE /api/clients/{id}   (desactivacion suave, nunca borra)
+        (la ruta 50 /api/** del gateway ya lo lleva a core-service: sin tocar
+         el gateway ni el gateway-service properties)
+  [x] frontend - features/admin/clients-admin (wireframe
+      gesti_n_de_clientes_admin_panel):
+      - sidebar con "Clientes" activo y links reales: Catalogo <-> /panel,
+        Clientes -> /panel/clientes (RouterLink en AMBOS componentes; ademas
+        se corrigio el h2/p del sidebar del catalogo a "Velvet & Gilt" /
+        "Admin Panel" como dice el code.html)
+      - buscador superior "Buscar cliente, evento o correo..." + iconos
+        notifications/help
+      - encabezado "Gestion de Clientes" + subtitulo + segmentos
+        Todos/VIP/Corporativo/Particular (botones, no select)
+      - tabla: Cliente (inicial + correo), Tipo (badge VIP dorado, resto
+        gris), Ultimo Evento, Reservas, Gasto Acumulado (Intl es-MX MXN),
+        Estado (punto dorado = Activo / gris = Inactivo), Acciones
+        "Ver Detalles"; paginacion de 10 en 10 ("Mostrando X a Y de N")
+      - modal Detalle: resumen (inicial grande, tier, gasto, reservas,
+        ultimo evento, estado) + formulario editable (nombre, correo,
+        whatsapp, ubicacion, tier, gasto, cliente activo) + Desactivar /
+        Cancelar / Guardar
+      - ruta /panel/clientes con canActivate (authGuard); app.ts ya oculta
+        la barra publica con startsWith('/panel')
+      - NO hay boton "Agregar Nuevo" porque el wireframe no lo trae (los
+        clientes nacen del cotizador en la fase 4); el POST existe igual
+        en el backend
+  [x] Verificado en la sesion 4 (por :8080 y por el proxy :4200):
+        login 200 | GET /api/clients = 3 (seeds) | sin token 401 |
+        POST 201 | POST duplicado 409 | PUT 200 (tier/gasto ok) |
+        ?tier=VIP 1 y ?tier=CORPORATIVO 2 | ?search=prueba 1 |
+        DELETE soft 200 (active=false) | id inexistente 404 |
+        /panel/clientes 200 | Flyway aplico V5 y V6 (core_db en v6) |
+        ng build sin warnings
+  [x] DB restaurada a los 3 seeds (borre el cliente de prueba id=4)
+
+  NOTA: ya la Fase 4 los actualiza: al pasar una solicitud a CONFIRMADO se
+  suma total_spent / reservations / last_event, y al salir de CONFIRMADO se
+  restan (last_event se recalcula con el ultimo evento confirmado).
+
+
+--------------------------------------------------------------------------------
+0.6 FASE 4 (solicitudes) + FASE 5 (link + PDF) - SESION 5 (SIN COMMITEAR)
+--------------------------------------------------------------------------------
+
+  ESTADO AL CIERRE: core-service compila (mvn -DskipTests compile = EXIT 0),
+  ng build SIN warnings, ng test 8 archivos / 10 tests OK.
+  NO se hizo la prueba end-to-end (Docker estaba apagado; ver bloque 0.4).
+
+  [x] BACKEND core-service (archivos NUEVOS = untracked):
+      - V7__set_tier_prices.sql: precios de service_tiers (V4 los dejo NULL;
+        sin V7 el cotizador cobra $0). BASE=6.00 por persona-hora,
+        PREMIUM=6.00 por persona (una sola vez), PERSONAL=25.00 por
+        bartender-hora.
+      - V8__create_requests.sql: tabla requests (folio UNIQUE, public_token
+        UNIQUE, FK event_type_id, FK client_id ON DELETE SET NULL, montos
+        DECIMAL(12,2), status default 'PENDIENTE') + tabla puente
+        request_cocktails (PK compuesta, FKs ON DELETE CASCADE).
+      - Entidades: Request, RequestLevel (BASE/PREMIUM), RequestStatus
+        (PENDIENTE/CONFIRMADO/CANCELADO). NO hay nivel PERSONAL: ese costo
+        entra por extraBartenders.
+      - DTOs: SolicitudRequest (Bean Validation: eventDate yyyy-MM-dd,
+        eventTime HH:mm, guests 1..100000, duration 1..24, level no vacio,
+        cocktailIds no nulos), SolicitudResponse (+ Breakdown, CocktailRef,
+        ClientRef, fabrica from(Request)), StatusUpdateRequest.
+      - SolicitudService:
+          create   -> folio "REQ-%03d" (tras 2 saves, arranca TMP-...),
+                      publicToken = UUID sin guiones, upsert de Client por
+                      email (reactiva inactivos y pisa nombre/whatsapp),
+                      prices() desde service_tiers
+          getByToken / getAdmin / listAdmin(?status=&search=) /
+          updateStatus (recalcula total_spent, reservations y last_event)
+      - SolicitudPdfService (NUEVO): openhtmltopdf-pdfbox 1.0.10 (la
+        dependencia ya estaba en el pom y NADIE la usaba).
+        OJO: el parser de openhtmltopdf es XML -> el HTML tiene que ser
+        XHTML estricto (todo tag cerrado, & escapado, sin '<' en el texto)
+        y conviene el header <?xml ... encoding="UTF-8"?>.
+      - Endpoints:
+          PUBLICOS (sin token):
+            POST   /api/public/solicitudes                 -> 201 + folio
+            GET    /api/public/solicitudes/{token}         -> 200 / 404
+            GET    /api/public/solicitudes/{token}/pdf     -> application/pdf
+          ADMIN (Bearer + ROLE_ADMIN):
+            GET    /api/requests?status=&search=
+            GET    /api/requests/{id}
+            GET    /api/requests/{id}/pdf                  -> application/pdf
+            PUT    /api/requests/{id}/status   (400 si el estado es invalido)
+          NO hizo falta tocar el gateway: la ruta 40 /api/public/** y la 50
+          /api/** ya llevan todo a core-service.
+      - SecurityConfig (MODIFICADO, unico diff backend previo): agrega
+        "/error" a permitAll(). Sin eso el 404/400 devolvia 401 en vez del
+        JSON de GlobalExceptionHandler.
+      - FIX aplicado: al salir de CONFIRMADO ahora se revierte
+        client.lastEvent con el ultimo evento confirmado que le quede al
+        cliente (RequestRepository.findByClientAndStatusOrderByEventDateDesc)
+        y descripcionEvento tolera eventDate nulo.
+
+  [x] FRONTEND (rutas nuevas en app.routes.ts):
+        /panel                  -> CatalogAdmin   (igual que antes)
+        /panel/clientes         -> ClientsAdmin   (igual que antes)
+        /panel/solicitudes      -> RequestsAdmin  (NUEVO)
+        /panel/solicitudes/:id  -> RequestDetail  (NUEVO)
+        /panel/dashboard        -> RequestsAdmin  (NUEVO: alias al dashboard)
+        /cotizador              -> Quote          (NUEVO: salia en el diff)
+        /solicitud/:token       -> Seguimiento    (NUEVO, PUBLICO, Fase 5)
+        **                      -> Home
+        OJO: el Placeholder quedo FUERA de rutas (features/placeholder es
+        codigo muerto; se conserva por si se necesita, su spec sigue pasando)
+      - features/quote/          cotizador 3 pasos + pantalla de
+                                 confirmacion (folio, link de seguimiento
+                                 copiar/abrir, descarga del PDF publico)
+      - features/admin/requests-admin  "Vision General" = dashboard (4
+                                 metricas calculadas EN CLIENTE: total,
+                                 ingresos, proximos 7 dias, pendientes) +
+                                 tabla con busqueda, filtro por estado y
+                                 paginacion de 10
+      - features/admin/request-detail  wireframe detalle_de_solicitud_admin:
+                                 cabecera con folio/estado + acciones
+                                 (Cambiar Estado -> selector inline, Descargar
+                                 PDF via blob con Authorization, Enviar
+                                 WhatsApp), tarjetas de cliente, evento,
+                                 menu y desglose financiero. Reusa
+                                 requests-admin.css via styleUrls
+      - features/seguimiento/    pantalla publica por token (estado + resumen
+                                 del estado, evento, datos, carta, desglose,
+                                 WhatsApp y PDF)
+      - Sidebars de los 4 componentes admin: Dashboard, Solicitudes, Clientes
+        y Catalogo ahora son <a> con routerLink + routerLinkActive (antes
+        Dashboard/Configuracion eran <span> muertos y Solicitudes no existia
+        en catalog/clients). "Nueva Reserva" deja de estar disabled y va a
+        /cotizador. Los <ts> importan RouterLinkActive.
+      - CSS: 5 clases que el cotizador usaba sin definir (.columna-form,
+        .filas, .catalogo, .banner-capas, .resumen-final) + color base y
+        hover en .item del sidebar (los 3 css de admin)
+      - Montos unificados a es-MX / MXN (quote, requests-admin, request-detail,
+        seguimiento); antes decian USD y los wireframes dicen MXN
+      - angular.json: budgets subidos a 600kB (initial) y 20kB
+        (anyComponentStyle) porque quote.css ya pesa 16.5kB
+
+  [x] TESTS: cd frontend && ng test -> 8 archivos / 10 tests en verde
+      - catalog.spec.ts roto y arreglado (importaba 'Catalog' en vez de
+        'CatalogService' y no proveia HttpClient)
+      - app.spec / home.spec / placeholder.spec arreglados (faltaban
+        provideRouter + provideHttpClient; ademas el "Hello, frontend" ya no
+        existe en app.html -> ahora verifica la marca "Velvet & Gilt")
+      - NUEVOS: request-detail.spec, requests-admin.spec (espera el flush de
+        GET /api/requests), seguimiento.spec
+      (en la sesion 6 se agrego whatsapp.spec y el total subio a 14)
+
+  [x] LO QUE SE CERRO DESPUES (sesion 6, ver bloque 0.7):
+      1. Prueba end-to-end  HECHA (MySQL + core + notification en vivo)
+      2. Calendario de eventos  HECHO  -> /panel/calendario
+      3. Paginacion server-side + /resumen  HECHOS (JPQL con Page)
+      4. Transiciones de estado validadas  HECHAS (409 Conflict)
+      5. notification-service (Fase 6)  HECHO (backend completo)
+  [ ] SIGUE FALTANDO: commit + push (preguntar), RabbitMQ + sender de
+      WhatsApp automatico, Fase 7 (nube), pantalla de Configuracion
+
+
+--------------------------------------------------------------------------------
+0.7 SESION 6 - TERMINALES SUELTAS DE LA FASE 4/5 + FASE 6 (SIN COMMITEAR)
+--------------------------------------------------------------------------------
+
+  ESTADO AL CIERRE: core compila y pasa sus 4 tests, notification compila y
+  pasa sus 5 tests, ng build SIN warnings y ng test 14 tests en verde.
+  Verificado en vivo con MySQL + core-service (:8082) + notification (:8083).
+
+  [x] PAGINACION SERVER-SIDE (core-service)
+      - RequestRepository.search(status, needle, Pageable) con JPQL y
+        countQuery: filtra por estado y por folio/cliente/correo/lugar/tipo
+        de evento en la BD (antes se traia todo y se filtraba en memoria)
+      - DTO SolicitudPageResponse {items,total,page,size,totalPages}
+      - GET /api/requests ahora SIEMPRE pagina: ?page=&size=&status=&search=
+      - GET /api/requests/resumen -> {solicitudes, ingresosEstimados,
+        proximosEventos, pendientes, confirmadas, canceladas} con 4 queries
+        (el dashboard ya no baja la tabla completa)
+      - GET /api/requests/eventos?desde=&hasta= -> lista ligera para el
+        calendario (RequestEventoResponse)
+      - Frontend: admin-requests.page()/resumen()/eventos(); la busqueda del
+        dashboard se debouncea 300 ms y pagina=1 automaticamente; si la pagina
+        actual queda vacia regresa a la 1
+
+  [x] TRANSICIONES DE ESTADO (core-service)
+      - Matriz en SolicitudService: PENDIENTE->{CONFIRMADO,CANCELADO},
+        CONFIRMADO->{PENDIENTE,CANCELADO}, CANCELADO->{PENDIENTE}
+      - Salto invalido -> ConflictException -> 409 con mensaje legible;
+        el detalle de la solicitud muestra "No se pudo actualizar el
+        estado: Transicion no permitida: ..."
+      - Tests: SolicitudServiceTransicionesTests (4 casos con Mockito)
+
+  [x] CALENDARIO (Fase 4 cerrada)
+      - features/admin/calendario.{ts,html,css} + ruta /panel/calendario
+        (con authGuard) + link "Calendario" en los 4 sidebars
+      - Rejilla dom-sab del mes, nav anterior/siguiente/Hoy, chips por dia
+        con folio+cliente+estado (colores), filtro por estado, clic ->
+        /panel/solicitudes/:id; reusa requests-admin.css
+
+  [x] FASE 6 - notification-service (ya no esta vacio)
+      - pom: + spring-boot-starter-security y spring-boot-starter-mail
+      - V1__create_notifications.sql: tabla notifications (type, channel,
+        recipient, subject, body, reference_id, status, transport, error,
+        created_at, sent_at) en notif_db
+      - Entity Notification + enums NotificationType (SOLICITUD_CREADA,
+        ESTADO_CAMBIADO), NotificationChannel (EMAIL, WHATSAPP),
+        NotificationStatus (PENDIENTE, ENVIADA, FALLIDA)
+      - NotificationService: crear/reenviar/listar; si el transportador
+        falla la notificacion queda FALLIDA con el error (nunca rompe al
+        cliente), reenviar la deja de nuevo PENDIENTE
+      - Transportadores: ConsoleNotificationSender (siempre, imprime el
+        mensaje) y SmtpNotificationSender (solo si existe spring.mail.host)
+        -> NotificationDispatcher elige por canal y orden
+      - Endpoints:
+          POST /api/notifications            publico (lo llama core directo
+                                              a :8083, sin pasar por gateway)
+          GET  /api/notifications?status=    solo ADMIN
+          PUT  /api/notifications/{id}/reenviar  solo ADMIN
+        Seguridad = mismo patron que core (GatewayHeaderAuthFilter leyendo
+        X-User-Email/X-User-Role que pone el gateway + @PreAuthorize)
+        El gateway YA tenia la ruta /api/notifications/** -> :8083
+      - core-service: NotificationClient (RestClient a
+        app.notifications.url, timeout 2s/3s) que se dispara DESPUES del
+        commit (TransactionSynchronization) y nunca rompe la operacion:
+          solicitud creada -> aviso al admin con folio, datos y link
+          estado cambiado -> aviso al cliente (destino = su correo)
+        Props en core application.properties: app.notifications.url,
+        app.public-url (para armar el link /solicitud/{token}) y
+        app.admin-email
+
+  [x] BOTON DE WHATSAPP CON EL PAQUETE (lo pidio el usuario)
+      - core/utils/whatsapp.ts: mensajePaquete(solicitud) arma el texto con
+        nombre, evento, fecha, lugar, invitados, nivel, carta, desglose,
+        total, estado y link; enlaceWhatsapp() lo codifica para wa.me
+      - Se usa en requests-admin (fila) y request-detail (boton) ->
+        admin escribe al CLIENTE (destino = whatsapp del cliente)
+      - Si el cliente no tiene telefono el boton queda deshabilitado
+      - OJO: esto NO envia nada solo; abre WhatsApp con el texto armado
+        (envio automatico = fase 8 con Evolution API / Cloud API)
+
+  [x] CLIENTE -> DUENO (sesion 7, lo pidio el usuario)
+      - WHATSAPP_OWNER = '51937336603' (numero del dueño, Peru)
+      - enlaceConDueno(mensaje) = enlaceWhatsapp(WHATSAPP_OWNER, ...)
+      - mensajeParaDueno(solicitud): "Hola, soy {nombre} y acabo de
+        generar mi paquete (REQ-XXX)..." + evento, fecha, lugar,
+        invitados, nivel, carta, total y link de seguimiento
+      - Cotizador confirmacion: boton "Enviar mi paquete por WhatsApp"
+        y "Contactar via WhatsApp" (antes iba a /contacto, bug)
+      - Seguimiento /solicitud/{token}: boton "Enviar mi paquete por
+        WhatsApp" (antes abria chat CON EL PROPIO NUMERO del cliente)
+      - Contacto: WhatsApp Business era href="#" con +52 55 1234 5678
+        -> ahora wa.me/51937336603 y "+51 937 336 603"
+
+  [x] TESTS AGREGADOS EN LA SESION 6
+      - core-service: 4 (transiciones, reversion de cliente, estado invalido)
+      - notification-service: 5 (enviada, fallida, tipo invalido, 404, retry)
+      - frontend: whatsapp.spec -> 9 archivos / 16 tests (2 nuevas:
+        WHATSAPP_OWNER/enlaceConDueno y mensajeParaDueno)
+
+  [x] SESION 7 (parcial) - CELULAR, CONFIGURACION Y CONTACTO
+      - CORS: el telefono fallaba con "No se pudo enviar la solicitud" porque
+        el gateway solo aceptaba Origin localhost:4200 (devolvia 403 sin
+        cuerpo). CorsConfig ahora lee app.cors.allowed-origins (properties)
+        con localhost, 127.0.0.1 y la IP LAN 192.168.18.21. En la nube se
+        cambia por env APP_CORS_ALLOWED_ORIGINS (sin recompilar)
+      - ng serve abierto a la red: --host 0.0.0.0 (http://192.168.18.21:4200)
+      - Numero del dueno configurable (antes hardcodeado en whatsapp.ts):
+        core_service V9__create_app_settings (tabla app_settings con
+        whatsapp_owner / contact_email / business_name),
+        SettingsService + SettingAdminController (GET/PUT /api/settings,
+        solo ADMIN) + PublicSettingsController (GET /api/public/settings)
+        + frontend SettingsService (carga en App, signal whatsappDueno)
+        + setDuenoWhatsapp() en core/utils/whatsapp (enlaceConDueno ya no
+        usa la constante fija)
+      - Pantalla /panel/configuracion (nueva ruta + link en los 5 sidebars,
+        antes era un <span> muerto): WhatsApp del negocio, nombre y correo
+      - Formulario de contacto arreglado: era un <button type="button">
+        sin handler; ahora valida nombre/correo y abre wa.me/dueno con el
+        mensaje armado (fecha con fechaLarga); el panel de contacto muestra
+        el numero y correo desde los settings
+      - Tests: frontend 9 archivos / 18 tests (2 nuevas sobre
+        setDuenoWhatsapp); core mvn test EXIT=0
+      - Servicios corren desde jar (gateway y core) porque los argfiles de
+        Temp se borran; mvn -DskipTests package y java -jar
+
+  [x] DOCKER (listo, imagenes ya construidas y probadas)
+      - Dockerfile raiz generico: docker build --build-arg MODULE=<servicio>
+        (multi-stage: maven:3.9-eclipse-temurin-25 -> eclipse-temurin:25-jre)
+      - frontend/Dockerfile: node:22-alpine (npm ci + ng build production)
+        -> nginx:alpine con frontend/nginx.conf (estatico + proxy /api -> gateway)
+      - .dockerignore y frontend/.dockerignore (sin target/node_modules/dist)
+      - docker-compose.yml completo: mysql + eureka + auth + core +
+        notification + gateway + frontend; solo se publican frontend :80 y
+        mysql :3306 (el resto queda en la red interna)
+      - Variables por entorno: JWT_SECRET, CORS_ORIGINS, PUBLIC_URL,
+        ADMIN_EMAIL, SPRING_DATASOURCE_URL (mysql:3306/...), EUREKA_*
+      - Comandos: docker compose up -d --build / down / ps / logs <svc>
+      - Probado: las 6 imagenes compilaron; el stack arranca (mysql
+        compartido con el dev local, volumen mysql_data intacto)
+      - Para la nube: PUBLIC_URL=https://tudominio.com,
+        CORS_ORIGINS=https://tudominio.com, JWT_SECRET=<secreto fuerte>
+      - OJO: los servicios locales (jar en la PC) y los de Docker conviven
+        (no chocan puertos) pero traen 2 Eurekas; para produccion usar solo
+        docker compose
+
+  [ ] FALTA (para la sesion 7, en este orden):
+      1. Fase 7 REAL: elegir proveedor (Oracle Always Free / VPS) y desplegar
+         ahi el docker-compose + dominio + HTTPS
+      2. RabbitMQ: reemplazar el HTTP core->notificacion por cola (async y
+         con reintentos); depende de si el usuario quiere el envio automatico
+      3. Sender de WhatsApp real (Evolution API self-hosted o Cloud API) para
+         que las cotizaciones nuevas lleguen solas al numero del dueño
+         (DECISION DEL USUARIO: no por ahora, cobra por mensaje)
+      4. Pendientes chicos: paginacion de clientes/catalogo, foto hero
+         offline, correo SMTP real (spring.mail)
+      5. Pendientes funcionales: rol STAFF sin permisos (todo pide ADMIN),
+         no hay pantalla de notificaciones (GET /api/notifications sin UI),
+         historial de cambios de estado, dashboard real, auto-refresco del
+         seguimiento
+
+
+--------------------------------------------------------------------------------
+0.8 SESION 8 - PRECIOS EN SOLES (PEN) + EQUIPO AUTOMATICO + FIXES
+--------------------------------------------------------------------------------
+
+El modelo de precios cambio de USD/hora-persona a SOLES con equipo fijo por
+numero de invitados. Todo commiteado y verificado en vivo con Docker.
+
+COMMITS (origin/main, rama main):
+  44dcfb9  Fotos de cocteles: subida de archivos en el catalogo admin
+  1e9b39f  Precios en soles (PEN), equipo automatico por invitados y
+           tipo de cambio configurable
+  + commits de esta sesion (fix cotizador, textura, cache nginx, nota)
+
+[x] PRECIOS PEN (V11__pricing_pen_model.sql, ya aplicada en core_db):
+    - service_tiers: BASE=272 (bartender, paquete minimo 5h),
+      PERSONAL=150 (ayudante base), PREMIUM=0 (columna se conserva pero
+      YA NO se cobra; el cliente ya no elige nivel)
+    - app_settings: exchange_rate=3.4, base_hours=5, extra_hour_pen=40
+    - requests: +bartenders, +assistants (equipo guardado al crear)
+    - El cliente NO elige bartenders: el equipo se calcula solo
+    - Montos SIEMPRE en soles; UI/PDF/WhatsApp muestran
+      "S/ X (≈ US$ Y)" usando el tipo de cambio de configuracion
+      (frontend/src/app/core/utils/dinero.ts: montoDoble/soles/dolares)
+    - SettingsService (backend) lee exchange_rate/base_hours/
+      extra_hour_pen; el admin los edita en /panel/configuracion;
+      frontend settings.ts los carga como signals tipoCambio/horasBase/
+      horaExtra
+
+[x] TABLA DE EQUIPO (eventos normales; threshold = "cuando llega a N"):
+      1-54: 1B/0A   55: 2B      100: +1A    120: 3B     150: +2A
+      180: 4B       231: 5B     271: 6B+3A  331: 7B     371: 8B+4A
+      431: 9B       481: 10B+5A
+      despues de 481: +1 bartender c/50 invitados, +1 ayudante c/100
+    MASTERCLASS: 1 bartender SIEMPRE, 1 ayudante desde 60 invitados
+    Codigo espejado: SolicitudService.porInvitadosBartenders/Ayudantes
+    (arrays BARTENDER_STEPS/ASSISTANT_STEPS) y quote.ts equipo() con
+    la funcion contar(). Regresion cubierta en quote.spec.ts.
+
+[x] FOTOS DE COCTELES (commit 44dcfb9):
+    FileStorageService + POST /api/files (solo ADMIN, multipart, 5MB,
+    guarda en app.upload.dir=uploads) + GET /api/public/files/{name}.
+    Docker: volumen uploads_data montado en /data/uploads en core.
+    El modal del catalogo admin ya sube archivo (no solo URL).
+
+[x] FIXES IMPORTANTES DE LA SESION (NO repetir los bugs):
+    1. nginx.conf - CACHE: index.html debe salir con
+       Cache-Control "no-cache" y los assets hash (*.js/*.css) con
+       1 anio immutable. Sin esto el navegador se quedaba con la app
+       vieja y "no veia" los cambios.
+    2. nginx.conf - IMAGENES: location /api/ DEBE ser "^~ /api/".
+       Sin ^~, la regex de assets \.(jpg|png|...)$ tiene prioridad y
+       atrapa /api/public/files/*.jpg -> imagenes 404.
+    3. quote.ts - EQUIPO CONGELADO: equipo() y horasCobradas() eran
+       computed() de Angular pero leian propiedades NORMALES
+       (guests/durationHours); un computed solo se recalcula con
+       signals -> la vista se quedaba en 1 bartender aunque el usuario
+       escribiera 70. Ahora son metodos simples. NO volver a computed()
+       salvo que guests/durationHours se conviertan en signals.
+    4. Textura sutil de fondo (puntos dorados al 5% + brillo dorado
+       superior, sin fotos) agregada a .servicios y .cotizador/
+       .confirmacion (lo pidio el usuario; home/contacto si tienen foto).
+    5. Calendario: eventos CANCELADOS ocultos por defecto (visibles
+       solo con el filtro "Cancelado").
+    6. Cotizador paso 1: la tarjeta de estimacion ahora muestra
+       subtotales "Bartenders (N x H hrs)" y "Ayudantes (M x H hrs)".
+
+COMO CORRE HOY (TODO en Docker, 7 contenedores):
+    docker compose up -d --build
+    http://localhost       -> frontend + /api (nginx -> gateway:8080)
+    http://localhost:3306  -> MySQL (barpro/barpro, root/root)
+    Los demas puertos quedan en la red interna del compose.
+    frontend/proxy.conf.json apunta a http://localhost:80 (para
+    ng serve local contra el backend Docker); si el backend corre
+    como jar local, volverlo a :8080.
+
+VERIFICADO EN VIVO (sesion 8): mvn compile + 4/4 tests core;
+    ng build limpio; ng test 20/20 (10 archivos, incluye quote.spec);
+    smoke tests de TODOS los bordes de la tabla de equipo por API
+    (54/55/99/100/119/120/.../480/481/530/531) y MASTERCLASS;
+    PDF en PEN; tipo de cambio configurable probado (4 -> recalcula).
+
+[ ] SIGUE FALTANDO (orden sugerido):
+    1. Rol STAFF: existe pero todo pide ADMIN; darle permisos proprios
+    2. Pantalla de notificaciones en el panel (GET /api/notifications
+       funciona pero no hay UI)
+    3. Historial de cambios de estado de una solicitud
+    4. Auto-refresco del seguimiento /solicitud/{token}
+    5. Paginacion server-side de clientes y catalogo (solicitudes ya)
+    6. SMTP real (spring.mail.* en notification-service)
+    7. RabbitMQ: core->notificacion hoy es HTTP sincrono
+    8. Fase 7: nube -> PREPARADO en el repo (bloque 0.9); falta el paso
+       manual en Oracle (crear VM, abrir puertos, clonar y ./deploy.sh)
+    9. WhatsApp automatico: DECISION DEL USUARIO = no por ahora
+       (cobra por mensaje); el boton wa.me manual ya funciona
+   10. Decision: la columna level (BASE/PREMIUM) quedo cosmética
+       (no afecta precio); eliminarla del modelo/UI o conservarla
+       para un nivel futuro
+
+--------------------------------------------------------------------------------
+0.9 FASE 7 (nube) - PREPARACION LOCAL PARA ORACLE CLOUD - SESION 9
+--------------------------------------------------------------------------------
+
+El usuario tiene cuenta FREE de Oracle Cloud. Decisiones tomadas:
+  - Cuenta Always Free: 1 VM Ampere A1 (ARM) hasta 2 OCPU / 12 GB RAM,
+    Ubuntu 24.04, boot volume >= 47 GB (200 GB gratis en total).
+    Los 6 Dockerfiles ya son multi-arch (maven/temurin/node/nginx/mysql:8),
+    compilan nativos en ARM sin buildx.
+  - Acceso por IP:80 (SIN dominio por ahora); HTTPS/dominio despues
+    (Caddy o certbot delante del nginx) sin rehacer nada.
+  - Flujo de cambios elegido: git pull en el servidor + ./deploy.sh
+    (= git pull && docker compose up -d --build). La cache de Docker
+    reconstruye solo el servicio cuyo modulo cambio (el Dockerfile raiz
+    copia unicamente pom.xml + src del MODULO).
+
+CAMBIOS HECHOS EN EL REPO (esta sesion):
+  [x] .gitignore        + .env (secretos NUNCA se suben al repo)
+  [x] docker-compose.yml  MySQL publicado en 127.0.0.1:3306 (antes
+      0.0.0.0 con root/root -> en la nube era un agujero de seguridad;
+      local sigue igual con localhost:3306). MYSQL_ROOT_PASSWORD y el
+      healthcheck mysqladmin ahora leen ${MYSQL_ROOT_PASSWORD:-root}
+  [x] .env.example (nuevo): JWT_SECRET, MYSQL_ROOT_PASSWORD, PUBLIC_URL,
+      CORS_ORIGINS, ADMIN_EMAIL con instrucciones local/nube
+  [x] deploy.sh (nuevo): git pull + docker compose up -d --build + ps
+      (en la nube: bash deploy.sh; en Windows el dos CRLF no importa)
+
+PASOS EN ORACLE (manuales, pendientes - guia completa):
+  1. Console OCI -> Compute -> Create Instance:
+     shape VM.Standard.A1.Flex, 2 OCPU / 12 GB, Ubuntu 24.04,
+     boot volume 50 GB. Si da "out of host capacity": reintentar
+     o cambiar availability domain (limitacion conocida de Always Free).
+  2. VCN con internet + Security List: abrir ingress TCP 22 y 80
+     (443 cuando haya dominio). CERRAR 3306 (no publicar).
+  3. En la VM (SSH):
+       apt-get update && apt-get install -y docker.io docker-compose-v2
+       (o el script oficial get.docker.com)
+       usermod -aG docker $USER
+       dd swap (2 GB) para que los builds Maven no se ahoguen
+       git clone https://github.com/Aroncapi/Elixir-Cocktails.git
+       cp .env.example .env   -> JWT_SECRET fuerte (openssl rand -base64 48),
+       PUBLIC_URL=http://<IP>, CORS_ORIGINS=http://<IP>
+       ./deploy.sh            (primera vez: ~10-15 min build)
+  4. Verificar: docker compose ps (7 contenedores healthy) + login en
+     http://<IP> con admin@velvetgilt.com / admin123 -> CAMBIAR el
+     password apenas entre (el seed crea admin123 en DB nueva).
+  5. PRIMERA VEZ LA DB VA VACIA (solo seeds de Flyway); para migrar los
+     datos locales: mysqldump en PC -> import en el servidor.
+     Los volumenes mysql_data y uploads_data persisten entre deploys.
+
+FLUJO DE CAMBIOS DESPUES DEL DEPLOY:
+    PC:  git add -A && git commit -m "..." && git push
+    VM:  ./deploy.sh          (o: git pull && docker compose up -d --build)
+  - Cambio de CODIGO      -> rebuild (solo el modulo afectado, cache)
+  - Cambio de CONFIG      -> editar .env en la VM + docker compose up -d
+                             (sin --build, no recompila nada)
+  - Migraciones Flyway    -> solas al arrancar el contenedor
+  - DATOS                -> intactos (volumenes Docker)
+  - Links WhatsApp/PDF    -> usan window.location.origin o PUBLIC_URL,
+                             se solapan solos con la IP publica
+
+NO AFECTA a lo ya hecho:
+  - Botones wa.me del frontend: son puros links del lado cliente
+    (frontend/src/app/core/utils/whatsapp.ts), cero backend.
+  - notificaciones: siguen saliendo por CONSOLA (docker compose logs
+    notification); SMTP/WhatsApp automatico = fase 8 (pendiente).
+  - Solo quedan FUERA de este plan: dominio+HTTPS, CI/CD (opcional),
+    SMTP real, WhatsApp automatico.
+
+--------------------------------------------------------------------------------
+0.10 SESION 10 - OWASP (criticos + medios) + DESTILADOS + FIN SIN_ALCOHOL
+--------------------------------------------------------------------------------
+
+COMMITS (push a main; git log 222db00..97a803a):
+  ea83bee  Seguridad CRITICA: INTERNAL_TOKEN obligatorio gateway<->servicios
+           (los servicios solo confian en X-User-* si el token interno
+           coincide; el gateway lo inyecta y borra el del cliente),
+           JWT_SECRET y ADMIN_PASSWORD obligatorios en compose (ya NO arranca
+           sin ellos), AdminBootstrap sin loguear el password, eliminado el
+           "Cuenta demo: admin@... / admin123" del login
+  bda1e7e  Catalogo: destilado (spirit) - filtro lateral, chips en tarjetas,
+           select en admin, migracion V12, ?spirit= en el endpoint publico
+  770d8ff  backup.ps1 (dump de las 3 BD + fotos -> backup/<fecha>) y
+           backup/ en .gitignore (los respaldos NUNCA se suben al repo)
+  222db00  ajuste: spirit en CocktailPayload (servicio admin de Angular)
+  536fb5b  Seguridad MEDIA (ver listado abajo)
+  97a803a  Se elimina la categoria SIN_ALCOHOL: pasa a ser solo un destilado
+           (migracion V13 mueve esos cocteles a SIGNATURE; crear un coctel
+           con esa categoria ahora da 400)
+
+NUEVO EN EL DOMINIO:
+  - Cocktail.spirit (enum CocktailSpirit, nullable): TEQUILA, RON, VODKA,
+    GINEBRA, WHISKY, BRANDY, APERITIVO, SIN_ALCOHOL, OTRO (columna V12).
+    Lista fija COMPARTIDA: frontend/src/app/core/models/spirits.ts tiene que
+    coincidir con el enum de backend (si se agrega uno, agregar en los DOS
+    lados y hacer migracion).
+  - GET /api/public/cocktails acepta ?spirit= ademas de ?category= y ?search=
+  - Cotizador paso 2: DOS secciones - "Recomendados para tu evento" y
+    "Mas opciones para tu evento" (el resto) + filtro lateral de destilado.
+  - Categorias ahora SOLO: SIGNATURE, CLASICOS, CITRICOS.
+  - El panel admin muestra chip de destilado y lo edita en el modal.
+
+SECRETS (todo en .env local, gitignored; los valores tambien estan como
+variables de entorno del USUARIO en la PC para correr mvn/IDE sin Docker):
+  JWT_SECRET, INTERNAL_TOKEN (NUEVO, obligatorio), MYSQL_ROOT_PASSWORD=root,
+  ADMIN_PASSWORD=admin123 (NUEVO; compose lo exige), PUBLIC_URL,
+  CORS_ORIGINS. Ver .env.example con instrucciones.
+
+SEGURIDAD MEDIA APLICADA (536fb5b):
+  - Login: max 5 intentos fallidos por correo cada 15 min -> HTTP 429
+    (LoginRateLimiter en memoria) + hash fantasma para que el tiempo de
+    respuesta sea igual con o sin usuario (sin enumeracion por timing)
+  - POST /api/public/solicitudes: max 3 por IP cada 10 min -> 429
+    (IpRateLimiter; cuenta tambien los intentos fallidos; usa X-Forwarded-For)
+  - Upload /api/files: valida magic bytes (JPEG/PNG/GIF/WEBP) en vez de
+    confiar en el Content-Type del cliente
+  - nginx: X-Content-Type-Options nosniff, X-Frame-Options SAMEORIGIN,
+    Referrer-Policy (repetidos en cada location por la regla de add_header)
+  - Gateway: httpclient connect-timeout=3s, response-timeout=30s
+  - ConsoleNotificationSender: destinatario enmascarado (a***@dominio) y sin
+    cuerpo del mensaje en los logs (sin PII)
+  - Angular: interceptor -> en 401 hace logout y va a /login; el guard
+    considera vencido el JWT (lee exp sin verificar firma)
+
+VERIFICADO EN VIVO (sesion 10, todo por HTTP contra http://localhost):
+  6 login mala pass -> 401 x5 y 429 en el 6to; admin sigue entrando
+  PNG falso como imagen -> 400 "contenido no coincide"; PNG real -> 201
+  4 POST de cotizacion -> 201 x3 y 429 en la 4ta (las 3 de prueba se
+    borraron de la BD al final)
+  headers nginx correctos; V12 y V13 aplicadas; 0 cocteles SIN_ALCOHOL
+
+BACKUPS: .\backup.ps1 -> backup\YYYY-MM-DD_HHMM\ (respaldo.sql con las 3 BD
+  + carpeta uploads). Ultimo de la sesion 10: backup\2026-10-12_0146
+  (17 fotos, 10.1 MB) - copiado por el usuario a su Drive.
+
+TIPS DE LA SESION:
+  - Los builds Docker fallan seguido por red (descargas Maven): REINTENTAR
+    con docker compose up -d --build (2do intento casi siempre pasa).
+  - Si nginx da 502 tras recrear contenedores: docker compose restart
+    frontend (nginx cachea la IP del gateway al arrancar).
+  - Si el puerto 80 deja de responder desde Windows pero el contenedor
+    contesta con curl dentro: es el port-forward de Docker Desktop ->
+    docker compose restart frontend.
+
+PENDIENTES (orden sugerido para la sesion 11):
+  [ ] FASE 7 (nube): VM Oracle sigue sin capacidad (sa-santiago-1, AD-1
+      unico). Script de reintentos activo: tarea Windows "VelvetOciRetry"
+      -> C:\Users\AROM\.oci\launch-retry.ps1 (alterna 4/6 GB, A1 1 OCPU,
+      Ubuntu aarch64), log: C:\Users\AROM\.oci\launch-retry.log.
+      La VCN Velvet-vcn + IGW + subnet velvet-public ya existen; llave SSH:
+      C:\Users\AROM\.ssh\velvet_oci. Cuando salga: SSH, Docker+swap, .env
+      (JWT_SECRET, INTERNAL_TOKEN, ADMIN_PASSWORD FUERTE distinto de
+      admin123, PUBLIC_URL/CORS con la IP publica), abrir 80, ./deploy.sh.
+  [ ] OWASP restantes (bajo impacto): JWT de 24h sin refresh ni revocacion,
+      politica de password (solo largo minimo), IDs/folios secuenciales
+      (el acceso real ya es por token de 128 bits), swagger/eureka abiertos
+      solo en dev LAN (no publicados en compose), healthchecks de los 5
+      servicios en compose, imagenes con tag fijo y USER no-root.
+  [ ] SMTP/WhatsApp real (fase 8) y dominio + HTTPS en la nube.
+
+--------------------------------------------------------------------------------
+0.11 SESION 11 - TUNEL HTTPS PARA PROBAR DESDE LA APP MOVIL (iOS)
+--------------------------------------------------------------------------------
+
+  MOTIVO: la app iOS se compila y corre en un simulador EN LA NUBE (GitHub
+  Actions + MobAI), no en la PC. Para esa Mac, http://localhost es ella misma,
+  asi que NO alcanza el Docker local. El tunel publica el stack por HTTPS sin
+  abrir puertos del router: la PC solo hace una conexion SALIENTE.
+
+  [x] Script nuevo: tunnel.ps1 (raiz del repo)
+      - Comprueba que http://localhost:80 responda (avisa si Docker esta abajo)
+      - Usa cloudflared del PATH o C:\Users\AROM\Tools\cloudflared.exe; si no
+        existe lo descarga ahi (no requiere admin)
+      - Ejecuta: cloudflared tunnel --url http://localhost:80 --no-autoupdate
+      - Imprime la URL https://<algo>.trycloudflare.com y la escribe en
+        .tunnel-url (gitignored)
+
+  COMO SE USA:
+      cd C:\Users\AROM\Projects\bar-events
+      docker compose up -d            # si aun no esta arriba
+      .\tunnel.ps1                    # dejar la ventana abierta
+      # baseURL de la app iOS: https://<algo>.trycloudflare.com
+      # endpoints:             https://<algo>.trycloudflare.com/api/...
+
+  VERIFICAR ANTES DE TOCAR LA APP:
+      curl.exe https://<algo>.trycloudflare.com/api/public/cocktails
+      # debe devolver el JSON de cocteles (mismo que http://localhost/api/...)
+
+  RUTA DEL DATO:
+      app iOS -> Cloudflare (HTTPS) -> tunel -> nginx :80 -> /api ->
+      gateway-service :8080 -> Eureka -> auth/core/notification -> MySQL
+
+  [ ] LIMITACIONES / OJO:
+      - Quick tunnel: la URL CAMBIA cada reinicio. URL fija = named tunnel
+        con dominio propio (cloudflared tunnel create + CNAME DNS).
+      - La PC debe estar encendida, con Docker arriba y el script corriendo.
+      - Cualquiera con el enlace llega a la API (el JWT protege los datos);
+        no compartir la URL en publico. MySQL NO se expone (sigue en 127.0.0.1).
+      - Si una peticion del navegador/app web da 403, agregar ese origen a
+        app.cors.allowed-origins (env APP_CORS_ALLOWED_ORIGINS). Una app
+        nativa normalmente NO manda Origin, asi que no deberia aplicar.
+      - Alternativa a largo plazo: desplegar en la VM Oracle (bloque 0.9) y
+        usar esa URL en vez del tunel.
+
+  [ ] PENDIENTE: cliente iOS en SwiftUI que consuma esta API (login, catalogo,
+      cotizador, seguimiento). Va en repo aparte; para compilarlo con MobAI
+      seguir C:\Proyectos\AGENTS.md.
+
+--------------------------------------------------------------------------------
+1. CONFIGURACION BASE (YA USADA - no repetir)
+--------------------------------------------------------------------------------
+
+  Spring Boot:  4.1.1
+    OJO: el wizard de start.spring.io escribe "4.1.1.RELEASE" en el pom,
+    pero ESE artifacto NO existe en Maven Central (da 404).
+    Central tiene "4.1.1". Si el build falla con
+    "Non-resolvable parent POM", cambiar la version del parent a 4.1.1.
+    (YA CORREGIDO en los 5 poms)
+  Language:     Java
+  Type:         Maven
+  Group:        com.barpro
+  Java:         25
+  Packaging:    Jar
+
+  Servicios creados (ya existen, NO regenerar):
+    auth-service  com.barpro.auth         :8081
+    core-service  com.barpro.core         :8082
+    notification-service com.barpro.notification :8083
+    gateway-service com.barpro.gateway    :8080
+    eureka-server com.barpro.eureka       :8761
+
+  Frontend: CREADO (carpeta frontend/, sesion 2) - ver bloque 0.3
+
+--------------------------------------------------------------------------------
+2. VERSIONES DEL STACK (verificadas octubre 2026)
+--------------------------------------------------------------------------------
+
+  Java               25.0.4.1 (instalado)
+  Spring Boot        4.1.1 (parent real en Central, no usar .RELEASE)
+  Spring Cloud       2025.1.2 (Oakwood) - compatible con Boot 4.1
+                     -> Spring Cloud Netflix 5.0.2, Gateway 5.0.2
+  Angular            22.x (CLI 22.2.1 instalado; ng --version lo confirma)
+                     NO se instalo Angular Material: la UI va con CSS propio
+                     siguiendo el DESIGN.md (los wireframes vienen en tailwind)
+  Node.js            24.21 / npm 11.19 (instalados)
+  MySQL              8 (Docker, imagen mysql:8)
+  springdoc          3.1.1
+  Docker             29.8 (Docker Desktop instalado en
+                     C:\Users\AROM\AppData\Local\Programs\DockerDesktop
+                     - NO arranca solo, hay que abrirlo)
+  Git                2.53
+  Maven              3.9.16 en C:\Users\AROM\Tools\apache-maven-3.9.16\bin\mvn.cmd
+                     (no esta en el PATH de sesiones nuevas; usar la ruta completa
+                      o abrir terminal nueva despues del reinicio)
+
+--------------------------------------------------------------------------------
+3. DEPENDENCIAS POR SERVICIO (YA APLICADAS en los poms)
+--------------------------------------------------------------------------------
+
+[AUTH-SERVICE] spring-web, data-jpa, security, validation, mysql, flyway,
+               actuator, lombok + jjwt (api/impl/jackson 0.13.0),
+               eureka-client, springdoc 3.1.1
+
+[GATEWAY-SERVICE] actuator + spring-cloud-starter-gateway-server-webflux,
+               eureka-client, jjwt 0.13.0
+
+[CORE-SERVICE] spring-web, data-jpa, security, validation, mysql, flyway,
+               actuator, lombok + eureka-client, openfeign, springdoc 3.1.1,
+               openhtmltopdf-pdfbox 1.0.10
+
+[NOTIFICATION-SERVICE] spring-web, data-jpa, validation, mysql, flyway,
+               actuator, lombok + eureka-client, springdoc 3.1.1
+
+[EUREKA-SERVER] actuator + spring-cloud-starter-netflix-eureka-server
+
+--------------------------------------------------------------------------------
+4. DETALLES DE LOS POMs
+--------------------------------------------------------------------------------
+
+4.1 BOM DE SPRING CLOUD - esta en los 5 poms (tras </properties>):
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>org.springframework.cloud</groupId>
+                <artifactId>spring-cloud-dependencies</artifactId>
+                <version>2025.1.2</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+4.2 GATEWAY - RENOMBRE IMPORTANTE (Spring Cloud 2025.1.2 / Gateway 5.0.x):
+    el artifacto "spring-cloud-starter-gateway" ya NO existe y da error
+    "'version' ... is missing". El nombre nuevo (ya usado) es:
+        org.springframework.cloud:spring-cloud-starter-gateway-server-webflux
+    (la variante servlet seria ...-server-webmvc; el plan usa la reactiva)
+
+4.3 FLYWAY: el wizard de Boot 4.1 ya trae spring-boot-starter-flyway +
+    flyway-mysql automaticamente. La seccion "flyway-database-mysql" del plan
+    original NO hace falta; solo agregarla si aparece
+    "No database found to handle jdbc:mysql".
+
+--------------------------------------------------------------------------------
+5. COMANDOS UTILES (desde C:\Users\AROM\Projects\bar-events)
+--------------------------------------------------------------------------------
+
+  MySQL:
+      docker compose up -d          levanta MySQL
+      docker compose down           lo para
+      docker ps                     debe mostrar bar-events-mysql (healthy)
+      docker exec -it bar-events-mysql mysql -uroot -proot
+
+  Compilar un servicio:
+      C:\Users\AROM\Tools\apache-maven-3.9.16\bin\mvn.cmd -q -DskipTests compile -f auth-service\pom.xml
+
+  Arrancar un servicio:
+      C:\Users\AROM\Tools\apache-maven-3.9.16\bin\mvn.cmd spring-boot:run -f eureka-server\pom.xml
+      (o desde IntelliJ: Run en la clase main)
+      ORDEN: eureka -> auth/core/notification -> gateway
+      (el detalle completo de puertos/procesos y como reiniciarlos: bloque 0.4)
+
+  Frontend:
+      cd frontend && ng serve     http://localhost:4200  (proxy -> :8080)
+
+  Prueba rapida del flujo (PowerShell):
+      $t = (Invoke-RestMethod -Method Post -Uri http://localhost:8080/api/auth/login `
+            -ContentType 'application/json' `
+            -Body '{"email":"admin@velvetgilt.com","password":"admin123"}').token
+      Invoke-RestMethod -Uri http://localhost:8080/api/auth/me -Headers @{Authorization="Bearer $t"}
+      Invoke-RestMethod -Uri http://localhost:8080/api/public/cocktails   (publico, sin token)
+
+  Credenciales DB (usuario barpro, creado por init.sql):
+      localhost:3306  auth_db / core_db / notif_db
+      usuario: barpro   password: barpro   root: root
+
+--------------------------------------------------------------------------------
+6. RECORDATORIOS IMPORTANTES
+--------------------------------------------------------------------------------
+
+- Spring Cloud (Gateway, Eureka, OpenFeign) NUNCA aparece en el wizard de
+  IntelliJ: el BOM + starters siempre se agregan manuales en el pom.
+- Herramientas ya instaladas en sesion 1: Maven 3.9.16, Angular CLI 22.
+- Frontend: YA EXISTE la carpeta frontend/ (ng new hecho en sesion 2).
+  Para correrlo: cd frontend && ng serve  (http://localhost:4200)
+- El usuario trabaja en IntelliJ; si no reconoce el proyecto:
+  File -> Open -> elegir la CARPETA bar-events (importa los 5 modulos Maven).
+- Wireframes del diseno: C:\Users\AROM\Downloads\stitch_velvet_gilt_event_platform
+  (12 pantallas code.html + screen.png + velvet_gilt\DESIGN.md;
+   NO existe pantalla de login -> disenarla. Ver bloques 0.3 y 0.4)
+
+--------------------------------------------------------------------------------
+7. ARQUITECTURA RESUMEN
+--------------------------------------------------------------------------------
+
+  Angular 22  (dev: http://localhost:4200, proxy.conf.json -> :8080)
+        |
+        v
+  gateway :8080  (Spring Cloud Gateway + validacion JWT; en prod seria el
+        |         unico puerto expuesto, en dev se puede tocar :8081/:8082 directo)
+        |
+        +--> auth-service :8081         (login, usuarios, roles, JWT)   [OK]
+        +--> core-service :8082         (cocteles, tipos de evento, tiers,
+        |                                clientes, solicitudes #REQ, cotizador,
+        |                                desglose, PDF, calendario)      [OK]
+        +--> notification-service :8083 (notifications: crear/listar/
+                                         reenviar, sender CONSOLA/SMTP,
+                                         core la llama tras el commit)   [OK]
+        |
+  eureka-server :8761 (descubrimiento de servicios; clientes usan
+                       eureka.instance.hostname=localhost)
+
+  MySQL 8 (Docker): auth_db | core_db | notif_db  (database-per-service)
+
+  JWT: auth-service emite (HS256, signWith(key, Jwts.SIG.HS256)),
+       secret = app.jwt.secret en application.properties (default de DEV
+       en los 3 servicios; PROD se sobreescribe con la env var JWT_SECRET,
+       MISMO valor en auth y gateway), el gateway valida y propaga
+       X-User-Email / X-User-Role (borra los que mande el cliente).
+
+  ENDPOINTS IMPLEMENTADOS (a traves del gateway :8080):
+    POST /api/auth/login            publico        -> {token, type, user}
+    GET  /api/auth/me               con token
+    GET/POST/PUT/DELETE /api/users  solo ADMIN     (roles: ADMIN / STAFF)
+    GET  /api/public/cocktails|event-types|service-tiers   publico
+    GET/POST/PUT/DELETE /api/cocktails|event-types|service-tiers  solo ADMIN
+    GET/POST/PUT/DELETE /api/clients  solo ADMIN  (?search=&tier= en el GET)
+    POST /api/public/solicitudes               publico -> 201 + folio + token
+    GET  /api/public/solicitudes/{token}       publico -> seguimiento
+    GET  /api/public/solicitudes/{token}/pdf   publico -> application/pdf
+    GET  /api/requests?status=&search=&page=  solo ADMIN -> pagina JSON
+    GET  /api/requests/resumen                 solo ADMIN -> metricas
+    GET  /api/requests/eventos?desde=&hasta=   solo ADMIN -> calendario
+    GET  /api/requests/{id}  |  /{id}/pdf      solo ADMIN
+    PUT  /api/requests/{id}/status             solo ADMIN (409 si la
+                                                transicion no esta permitida)
+    POST /api/notifications     solo con X-Internal-Token (gateway/core;
+                                con JWT normal da 403, sin token da 401)
+    GET  /api/notifications?status=&type=      solo ADMIN
+    PUT  /api/notifications/{id}/reenviar      solo ADMIN
+    (GET a las rutas admin requieren header X-User-Role: ADMIN del gateway)
+
+  ENTIDADES EN core-service:
+    Cocktail        nombre, categoria (SIGNATURE/CLASICOS/CITRICOS),
+                    destilado spirit opcional (TEQUILA...OTRO, sesion 10),
+                    ingredientes, imagen, activo,
+                    tipos de evento recomendados        [creada, con seeds]
+    EventType       Bodas, Corporativos, Fiestas Privadas, Masterclass [OK]
+    ServiceTier     Servicio Base (precio por persona-hora), Menu Premium
+                    (por persona, una vez), Personal adicional (por
+                    bartender-hora)                     [OK, precios en V7]
+    Client          nombre, email, whatsapp, ubicacion, tier
+                    (VIP/Corporativo/Particular), gasto acumulado
+                    + reservations / last_event (los actualiza core al
+                    confirmar o cancelar una solicitud)  [OK]
+    Request         folio #REQ-xxx, token publico, cliente, tipo evento,
+                    fecha/hora, invitados, duracion, ubicacion, cocteles,
+                    desglose (base + premium + personal), total,
+                    estado (PENDIENTE/CONFIRMADO/CANCELADO)   [OK]
+
+  ENTIDADES EN notification-service:
+    Notification    type (SOLICITUD_CREADA/ESTADO_CAMBIADO), channel
+                    (EMAIL/WHATSAPP), recipient, subject, body,
+                    reference_id, status (PENDIENTE/ENVIADA/FALLIDA),
+                    transport (CONSOLA/SMTP), error, created_at, sent_at [OK]
+
+--------------------------------------------------------------------------------
+8. DECISIONES DEL PROYECTO
+--------------------------------------------------------------------------------
+
+- Arquitectura: Microservicios (practica/CV)
+- Base de datos: MySQL ahora -> PostgreSQL despues (Flyway desde el dia 1,
+  SQL portable sin ENUM, para migrar cambiando 1 dependencia).
+  EXCEPCION: los PK usan BIGINT AUTO_INCREMENT (sintaxis MySQL); en Postgres
+  se cambiaria a GENERATED ... AS IDENTITY (esta en una sola migracion).
+- WhatsApp fase 1: enlace wa.me gratis (mensaje pre-llenado con cliente,
+  tipo de evento, fecha, cocteles y total). Fase 2: WhatsApp Business Cloud
+  API de Meta (verificacion Business + template aprobado + metodo de pago;
+  Mexico ~0.0085 USD por mensaje utility; primeros 1000 service/mes gratis).
+- UI: seguir el DESIGN.md de los wireframes Velvet & Gilt copiando el
+  HTML/CSS de los code.html -> CSS propio, SIN Tailwind ni Angular Material
+  (no se instalaron). Tokens reales ya en frontend/src/styles.css:
+  fondo #0f0f0f (body de los wireframes; el token surface #0d141d es para
+  secciones oscuras), superficie #151c25, tarjeta #1a1a1a, dorado #d4af37,
+  texto #dce3f0 / secundario #c4c7c7, Playfair Display + Inter,
+  esquinas rectas 0px, bordes dorados 1px (top de cards al 40%),
+  nav glass, layouts split-screen
+- El negocio NO tiene inventario: es servicio de mixologia preparado en el
+  evento (esto corrige una version vieja de esta nota)
+- Despliegue nube (fase 7): Oracle Cloud Always Free (cuenta del usuario;
+  VM Ampere A1 ARM 2 OCPU/12 GB + Ubuntu, acceso por IP:80, flujo
+  git pull + deploy.sh). Ver bloque 0.9. (Antes se habia planeado
+  Railway/Render; quedo descartado.)
+
+--------------------------------------------------------------------------------
+9. FASES DEL PROYECTO
+--------------------------------------------------------------------------------
+
+  Fase 0  Repo git, docker-compose (MySQL), scaffolding de los 5 servicios
+          [HECHA]
+  Fase 1  auth-service + gateway + JWT + Angular login/guards
+          [HECHA completa: backend + login/guards en Angular]
+  Fase 2  Catalogo de cocteles (CRUD admin) + tipos de evento + servicios/tiers
+          [HECHA completa: backend + UI admin del catalogo]
+  Fase 3  Clientes (VIP/Corp/Particular, gasto acumulado)
+          [HECHA completa: backend V5/V6 + UI /panel/clientes, sesion 4]
+  Fase 4  Solicitudes: cotizador publico 3 pasos, estados, dashboard admin,
+          desglose financiero + calendario
+          [HECHA completa: backend V7/V8, cotizador, dashboard, detalle,
+          /panel/calendario; ver bloques 0.6 y 0.7]
+  Fase 5  Link publico por token + PDF descargable
+          [HECHA completa: /solicitud/{token} + PDF publico y de admin,
+          ver bloque 0.6]
+  Fase 6  notification-service (notificaciones + sender)
+          [HECHA el backend: tabla notifications, CRUD, seguridad, sender
+          CONSOLA/SMTP y llamada desde core. FALTA: RabbitMQ (async) y el
+          transportador de WhatsApp automatico -> fase 8]
+  Fase 7  Despliegue en la nube + URL publica para compartir links
+          [PREPARADO en repo: .env.example, deploy.sh, MySQL cerrado en
+           127.0.0.1; falta montar la VM de Oracle -> bloque 0.9]
+  Fase 8  Opcional: WhatsApp Cloud API / Evolution API (envio automatico),
+          pagos Stripe, email SMTP real
+
+  Orden logico: 0 y 1 son base obligatoria; despues el admin (2 y 3) alimenta
+  al cotizador publico (4), que genera las solicitudes que el PDF (5) y
+  WhatsApp (6) comparten con el cliente.
+
+--------------------------------------------------------------------------------
+10. EL NEGOCIO EN 30 SEGUNDOS (contexto para no perderse)
+--------------------------------------------------------------------------------
+
+  Velvet & Gilt vende SERVICIO DE MIXOLOGIA para eventos: bartender + cocteleria
+  de autor que se prepara EN el evento. NO vende botellas, NO hay inventario.
+
+  A) PUBLICO (sin login) - Cotizador 3 pasos:
+     Paso 1  Tipo de evento (Bodas, Corporativos, Fiestas Privadas,
+             Masterclass) + invitados + duracion -> estimacion en tiempo real
+     Paso 2  Catalogo de cocteles: "Recomendados para tu evento" arriba y
+             "Mas opciones" debajo; filtros por busqueda, categoria
+             (Signature, Clasicos, Citricos) y destilado (sesion 10)
+             -> "Carta del Evento"
+     Paso 3  Datos del cliente (nombre, WhatsApp, email, ubicacion,
+             notas/alergias) -> resumen + desglose -> confirmar por
+             WhatsApp o Email -> folio #REQ-042 + PDF descargable
+
+  B) ADMIN (con login) - Panel:
+     Dashboard        metricas, solicitudes recientes
+     Solicitudes      tabla con folio, cliente, tipo evento, fecha,
+                      invitados, monto, estado (PENDIENTE/CONFIRMADO)
+     Detalle          datos cliente + detalles evento + menu seleccionado
+                      + desglose financiero; cambiar estado, PDF, WhatsApp
+     Catalogo         CRUD de cocteles (nombre, categoria, ingredientes,
+                      foto, activo/inactivo, recomendado para eventos)
+     Clientes         cartera VIP / Corporativo / Particular, reservas,
+                      gasto acumulado
+     Configuracion
+================================================================================
